@@ -1,0 +1,10 @@
+# Helm-чарт для сервиса. Версионируется отдельно от appVersion,
+# чтобы инфраструктурные правки не били по релизам приложения.
+apiVersion: v2
+name: devops-demo
+description: Демо-сервис для прогона DevOps quality gates
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: Dmitry Kozyrin

@@ -1,0 +1,20 @@
+# Всё, что не нужно внутри образа — выбрасываем, чтобы не разбухал (CI-17).
+.git
+.github
+.venv
+.idea
+.vscode
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+coverage.xml
+htmlcov
+tests
+docs
+deploy
+*.md
+!README.md
+Makefile
+.pre-commit-config.yaml

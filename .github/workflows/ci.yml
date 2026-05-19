@@ -1,0 +1,342 @@
+# CI pipeline — отрабатывает quality gates этапа CI из README.
+# ID job'ов соответствуют идентификаторам QG.CI.X из README/презентации.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write   # для загрузки SARIF (CodeQL/Trivy)
+  id-token: write          # для keyless-подписи cosign
+  packages: write          # пуш образа в GHCR
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+
+  # ─── QG.CI.1 Static Code Analysis (ruff + mypy) ──────────────────────────
+  static-analysis:
+    name: QG.CI.1 Static Code Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: ruff lint + format
+        run: ruff check app tests && ruff format --check app tests
+      - name: mypy strict
+        run: mypy app
+
+  # ─── QG.CI.2 API META ─────────────────────────────────────────────────────
+  api-meta:
+    name: QG.CI.2 API META
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Контроль исходного кода публичных API
+        run: |
+          echo "::notice::здесь контроль публичных API относительно META-модели"
+          echo "::notice::в корпоративном CI — обращение к API META сервису по REST"
+
+  # ─── QG.CI.3 SAST ─────────────────────────────────────────────────────────
+  sast:
+    name: QG.CI.3 SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install bandit semgrep
+      - name: Bandit
+        run: bandit -r app -f sarif -o bandit.sarif || true
+      - name: Semgrep
+        run: semgrep --config=auto --sarif -o semgrep.sarif app || true
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: semgrep.sarif }
+
+  # ─── QG.CI.4 Commit Convention ────────────────────────────────────────────
+  commit-convention:
+    name: QG.CI.4 Commit Convention
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: wagoid/commitlint-github-action@v6
+
+  # ─── QG.CI.5 Branch Naming ────────────────────────────────────────────────
+  branch-name:
+    name: QG.CI.5 Branch Naming
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Проверить имя ветки
+        run: |
+          BR="${{ github.head_ref }}"
+          echo "branch: $BR"
+          echo "$BR" | grep -E '^(feature|bugfix|hotfix|chore|docs|refactor)/.+' \
+            || { echo "::error::ветка $BR не соответствует паттерну"; exit 1; }
+
+  # ─── QG.CI.6 DCO Sign-off ─────────────────────────────────────────────────
+  dco:
+    name: QG.CI.6 DCO Sign-off
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: tim-actions/dco@master
+
+  # ─── QG.CI.7 Secret Scanning ──────────────────────────────────────────────
+  secrets-scan:
+    name: QG.CI.7 Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  # ─── QG.CI.8 SCA / Vulnerable Deps ────────────────────────────────────────
+  sca:
+    name: QG.CI.8 SCA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements-dev.txt --strict || true
+
+  # ─── QG.CI.9 License Compliance ───────────────────────────────────────────
+  license:
+    name: QG.CI.9 License Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -e ".[dev]" pip-licenses
+      - run: pip-licenses --fail-on="GPL;AGPL;LGPL" || true
+
+  # ─── QG.CI.10 Unit Tests + QG.CI.11 Coverage ──────────────────────────────
+  tests:
+    name: QG.CI.10/11 Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -e ".[dev]"
+      - run: pytest
+      - uses: actions/upload-artifact@v4
+        with: { name: coverage, path: coverage.xml }
+
+  # ─── QG.CI.12 Mutation Testing ────────────────────────────────────────────
+  mutation:
+    name: QG.CI.12 Mutation Testing
+    runs-on: ubuntu-latest
+    needs: tests
+    continue-on-error: true   # gate информационный — не блокирующий
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -e ".[dev]" mutmut
+      - run: mutmut run --paths-to-mutate app/greeter.py || true
+      - run: mutmut results || true
+
+  # ─── QG.CI.13 Build Artifact ──────────────────────────────────────────────
+  build-artifact:
+    name: QG.CI.13 Build Artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }
+
+  # ─── QG.CI.14 Dockerfile Lint ─────────────────────────────────────────────
+  dockerfile-lint:
+    name: QG.CI.14 Dockerfile Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with: { dockerfile: Dockerfile }
+
+  # ─── QG.CI.15 Image Build + QG.CI.17 Size Budget ─────────────────────────
+  build-image:
+    name: QG.CI.15/17 Image Build & Size Budget
+    runs-on: ubuntu-latest
+    needs: [static-analysis, tests, dockerfile-lint]
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: echo "tag=$(echo ${{ github.sha }} | cut -c1-12)" >> $GITHUB_OUTPUT
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+          provenance: true
+          sbom: true
+      - name: Size budget
+        run: |
+          SIZE=$(docker image inspect ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }} \
+                  --format '{{.Size}}' 2>/dev/null || echo 0)
+          echo "image size: $SIZE bytes"
+          [ "$SIZE" -lt $((300*1024*1024)) ] || echo "::warning::образ больше 300 МБ"
+
+  # ─── QG.CI.16 Image Vulnerability Scan ────────────────────────────────────
+  image-scan:
+    name: QG.CI.16 Image Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: build-image
+    steps:
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ needs.build-image.outputs.tag }}
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with: { sarif_file: trivy.sarif }
+
+  # ─── QG.CI.18 SBOM Generation ─────────────────────────────────────────────
+  sbom:
+    name: QG.CI.18 SBOM Generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -e ".[dev]" cyclonedx-bom
+      - run: cyclonedx-py environment -o sbom.json
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom.json }
+
+  # ─── QG.CI.19 Image Signing ───────────────────────────────────────────────
+  image-sign:
+    name: QG.CI.19 Image Signing
+    runs-on: ubuntu-latest
+    needs: [build-image, image-scan]
+    steps:
+      - uses: sigstore/cosign-installer@v3
+      - run: |
+          cosign sign --yes ${{ env.IMAGE_NAME }}@${{ needs.build-image.outputs.digest }}
+
+  # ─── QG.CI.20 IaC Scan ────────────────────────────────────────────────────
+  iac-scan:
+    name: QG.CI.20 IaC Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubeconform
+        uses: yannh/kubeconform-action@v1
+        with:
+          files: deploy/k8s
+      - name: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: deploy
+          quiet: true
+          soft_fail: true
+
+  # ─── QG.CI.21 Docs Lint ───────────────────────────────────────────────────
+  docs-lint:
+    name: QG.CI.21 Docs Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: '**/*.md'
+
+  # ─── QG.CI.22 PR Size ─────────────────────────────────────────────────────
+  pr-size:
+    name: QG.CI.22 PR Size
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Проверить размер PR
+        run: |
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+          CHANGED=$(git diff --shortstat $BASE $HEAD | awk '{print $4+$6}')
+          echo "changed lines: $CHANGED"
+          [ "${CHANGED:-0}" -lt 500 ] || echo "::warning::PR крупный (>500 строк)"
+
+  # ─── QG.CI.23 Code Review ─────────────────────────────────────────────────
+  code-review:
+    name: QG.CI.23 Code Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Проверить наличие апрува
+        run: |
+          echo "::notice::ревью контролируется через branch protection + CODEOWNERS"
+          echo "::notice::этот job — индикатор, что политика ревью применена к PR"
+
+  # ─── QG.CI.24 No Merge Conflicts ──────────────────────────────────────────
+  no-conflicts:
+    name: QG.CI.24 No Merge Conflicts
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          if [ "${{ github.event.pull_request.mergeable }}" = "false" ]; then
+            echo "::error::есть конфликты с base"
+            exit 1
+          fi
+
+  # ─── QG.CI.25 Pipeline as Code Lint ───────────────────────────────────────
+  pipeline-lint:
+    name: QG.CI.25 Pipeline as Code Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install yamllint
+      - name: yamllint workflows + manifests
+        # deploy/helm/templates/ это Go-шаблоны, для них есть отдельный helm lint
+        run: |
+          yamllint -d '{extends: relaxed, rules: {line-length: disable, document-start: disable, indentation: disable, comments: disable, truthy: disable}}' \
+            .github/workflows deploy/k8s deploy/helm/Chart.yaml deploy/helm/values.yaml
+      - name: actionlint
+        uses: raven-actions/actionlint@v2

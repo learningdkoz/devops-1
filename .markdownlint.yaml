@@ -1,0 +1,6 @@
+# Конфиг markdownlint для CI-21. Часть правил гасим — длинные строки в
+# таблицах и inline-HTML в README ок.
+default: true
+MD013: false   # длинные строки в таблицах
+MD033: false   # inline HTML
+MD041: false   # первая строка не обязательно H1

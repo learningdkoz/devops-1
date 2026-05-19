@@ -1,0 +1,14 @@
+# CODEOWNERS — нужен для CI-23 (Code Review).
+# Указываем владельцев областей кода, чтобы PR автоматом запрашивал ревью.
+
+# Глобальный владелец репы.
+*           @dmitrykozyrin
+
+# Питон-код
+/app/       @dmitrykozyrin
+/tests/     @dmitrykozyrin
+
+# Инфраструктура и пайплайны — отдельный апрув SRE/DevOps.
+/.github/   @dmitrykozyrin
+/deploy/    @dmitrykozyrin
+/Dockerfile @dmitrykozyrin

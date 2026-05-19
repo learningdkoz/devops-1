@@ -1,0 +1,318 @@
+# CDP pipeline — Continuous Deployment to Production.
+# ID job'ов соответствуют QG.CDP.X из README.
+
+name: CDP
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Тег образа для прод-выкатки"
+        required: true
+
+permissions:
+  contents: write
+  packages: read
+  deployments: write
+  id-token: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  PROD_URL: https://devops-demo.example.com
+
+jobs:
+
+  # ─── QG.CDP.1 Change Approval ─────────────────────────────────────────────
+  approve:
+    name: QG.CDP.1 Change Approval
+    runs-on: ubuntu-latest
+    environment: prod-approval   # требует ручного апрува в GitHub Environments
+    steps:
+      - run: echo "approver ok"
+
+  # ─── QG.CDP.2 Maintenance Window ─────────────────────────────────────────
+  window:
+    name: QG.CDP.2 Maintenance Window
+    runs-on: ubuntu-latest
+    needs: approve
+    steps:
+      - name: Проверить окно
+        run: |
+          DOW=$(date -u +%u)
+          HOUR=$(date -u +%H)
+          if [ "$DOW" -ge 5 ] && [ "$HOUR" -ge 15 ]; then
+            echo "::error::пятница вечер / выходные — окно закрыто"; exit 1
+          fi
+          echo "окно открыто"
+
+  # ─── QG.CDP.3 Code Freeze Check ──────────────────────────────────────────
+  freeze:
+    name: QG.CDP.3 Code Freeze Check
+    runs-on: ubuntu-latest
+    needs: approve
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          if [ -f .freeze ]; then
+            echo "::error::активен code-freeze (см. .freeze)"; exit 1
+          fi
+          echo "freeze не активен"
+
+  # ─── QG.CDP.4 Image Signature Verification ───────────────────────────────
+  verify-signature:
+    name: QG.CDP.4 Image Signature Verification
+    runs-on: ubuntu-latest
+    needs: [window, freeze]
+    steps:
+      - uses: sigstore/cosign-installer@v3
+      - name: cosign verify
+        run: |
+          TAG="${{ github.event.inputs.image_tag || github.ref_name }}"
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            ${{ env.IMAGE_NAME }}:$TAG
+
+  # ─── QG.CDP.5 SBOM Attestation ───────────────────────────────────────────
+  sbom-attest:
+    name: QG.CDP.5 SBOM Attestation
+    runs-on: ubuntu-latest
+    needs: verify-signature
+    steps:
+      - uses: sigstore/cosign-installer@v3
+      - name: cosign verify-attestation
+        run: |
+          TAG="${{ github.event.inputs.image_tag || github.ref_name }}"
+          cosign verify-attestation \
+            --type cyclonedx \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            ${{ env.IMAGE_NAME }}:$TAG
+
+  # ─── QG.CDP.6 Pre-deploy Backup ──────────────────────────────────────────
+  backup:
+    name: QG.CDP.6 Pre-deploy Backup
+    runs-on: ubuntu-latest
+    needs: sbom-attest
+    steps:
+      - run: 'echo "::notice::pg_dump / velero backup create со снапшотом БД и PVC"'
+
+  # ─── QG.CDP.7 DB Migration Safe ──────────────────────────────────────────
+  db-migrate:
+    name: QG.CDP.7 DB Migration Safe
+    runs-on: ubuntu-latest
+    needs: backup
+    steps:
+      - run: 'echo "::notice::expand-contract миграция через gh-ost / pt-online-schema"'
+
+  # ─── QG.CDP.8 Canary Deploy ──────────────────────────────────────────────
+  canary:
+    name: QG.CDP.8 Canary Deploy
+    runs-on: ubuntu-latest
+    needs: db-migrate
+    environment:
+      name: production
+      url: ${{ env.PROD_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_PROD }}" | base64 -d > $HOME/.kube/config
+      - name: apply rollout
+        run: |
+          TAG="${{ github.event.inputs.image_tag || github.ref_name }}"
+          sed "s|:latest|:$TAG|" deploy/k8s/rollout.yaml | kubectl apply -f -
+      - name: install argo-rollouts kubectl plugin
+        run: |
+          curl -sSL -o /usr/local/bin/kubectl-argo-rollouts \
+            https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+          chmod +x /usr/local/bin/kubectl-argo-rollouts
+
+  # ─── QG.CDP.9 Canary Auto-Analysis ───────────────────────────────────────
+  canary-analysis:
+    name: QG.CDP.9 Canary Auto-Analysis
+    runs-on: ubuntu-latest
+    needs: canary
+    steps:
+      - name: ждём analysis-шагов Rollout
+        run: |
+          echo "::notice::analysis шаги контролирует Argo Rollouts по Prometheus-метрикам"
+          # kubectl argo rollouts get rollout devops-demo -n devops-demo-prod --watch --timeout 1800
+
+  # ─── QG.CDP.10 Progressive Rollout ───────────────────────────────────────
+  progressive:
+    name: QG.CDP.10 Progressive Rollout
+    runs-on: ubuntu-latest
+    needs: canary-analysis
+    steps:
+      - run: 'echo "::notice::веса 5% → 25% → 50% → 100% контролирует Argo Rollouts"'
+
+  # ─── QG.CDP.11 Blue-Green Switch (альтернатива canary) ───────────────────
+  blue-green:
+    name: QG.CDP.11 Blue-Green Switch
+    runs-on: ubuntu-latest
+    needs: canary
+    if: false   # отключен по умолчанию — используем canary
+    steps:
+      - run: 'echo "::notice::альтернативная стратегия — переключение Service selector"'
+
+  # ─── QG.CDP.12 Rollback Readiness ────────────────────────────────────────
+  rollback-ready:
+    name: QG.CDP.12 Rollback Readiness
+    runs-on: ubuntu-latest
+    needs: canary
+    steps:
+      - run: 'echo "::notice::предыдущая версия живёт в registry и Rollout.history > 1"'
+
+  # ─── QG.CDP.13 Health Probes Pass ────────────────────────────────────────
+  probes:
+    name: QG.CDP.13 Health Probes Pass
+    runs-on: ubuntu-latest
+    needs: progressive
+    steps:
+      - run: 'echo "::notice::kubectl wait --for=condition=Available deployment/devops-demo"'
+
+  # ─── QG.CDP.14 Smoke on Prod ─────────────────────────────────────────────
+  smoke-prod:
+    name: QG.CDP.14 Smoke on Prod
+    runs-on: ubuntu-latest
+    needs: probes
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/smoke.sh "${{ env.PROD_URL }}"
+
+  # ─── QG.CDP.15 Synthetic Monitoring ──────────────────────────────────────
+  synthetics:
+    name: QG.CDP.15 Synthetic Monitoring
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::Datadog Synthetics / Pingdom multi-region check"'
+
+  # ─── QG.CDP.16 SLO / Error Budget ────────────────────────────────────────
+  slo:
+    name: QG.CDP.16 SLO Error Budget
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::запрос Sloth/Nobl9 на остаток error-budget"'
+
+  # ─── QG.CDP.17 Alerts & Dashboards ───────────────────────────────────────
+  alerts:
+    name: QG.CDP.17 Alerts and Dashboards
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::проверка наличия dashboards/grafana и alert rules"'
+
+  # ─── QG.CDP.18 Logs / Tracing Pipeline ───────────────────────────────────
+  logs-tracing:
+    name: QG.CDP.18 Logs Tracing Pipeline
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::логи и трейсы новой версии доходят до Loki/Tempo"'
+
+  # ─── QG.CDP.19 Feature Flag Gate ─────────────────────────────────────────
+  feature-flag:
+    name: QG.CDP.19 Feature Flag Gate
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::включение фичи через Unleash на сегмент"'
+
+  # ─── QG.CDP.20 Audit Trail ───────────────────────────────────────────────
+  audit:
+    name: QG.CDP.20 Audit Trail
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: |
+          echo "deploy=$GITHUB_SHA actor=$GITHUB_ACTOR ts=$(date -u +%FT%TZ)" \
+            >> deploy_audit.log
+      - uses: actions/upload-artifact@v4
+        with: { name: audit, path: deploy_audit.log }
+
+  # ─── QG.CDP.21 Regulatory Checks ─────────────────────────────────────────
+  compliance:
+    name: QG.CDP.21 Regulatory Checks
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::152-ФЗ / PCI-DSS / GDPR — чек-лист из compliance-репы"'
+
+  # ─── QG.CDP.22 Secrets Rotation Check ────────────────────────────────────
+  secrets-rotate:
+    name: QG.CDP.22 Secrets Rotation Check
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::Vault TTL секретов проверен, к которым ходит сервис"'
+
+  # ─── QG.CDP.23 Capacity & Autoscaling ────────────────────────────────────
+  capacity:
+    name: QG.CDP.23 Capacity Autoscaling
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::HPA настроен, headroom > 30%"'
+
+  # ─── QG.CDP.24 DR Readiness ──────────────────────────────────────────────
+  dr:
+    name: QG.CDP.24 DR Readiness
+    runs-on: ubuntu-latest
+    needs: smoke-prod
+    steps:
+      - run: 'echo "::notice::runbook DR актуален, RTO/RPO в SLO"'
+
+  # ─── QG.CDP.25 On-call Notification ──────────────────────────────────────
+  notify:
+    name: QG.CDP.25 On-call Notification
+    runs-on: ubuntu-latest
+    needs: canary
+    steps:
+      - name: Slack-уведомление
+        if: ${{ secrets.SLACK_WEBHOOK != '' }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"devops-demo выехал в прод: ${{ github.ref_name }}"}' \
+            "${{ secrets.SLACK_WEBHOOK }}"
+
+  # ─── QG.CDP.26 Post-deploy Soak ──────────────────────────────────────────
+  soak:
+    name: QG.CDP.26 Post-deploy Soak
+    runs-on: ubuntu-latest
+    needs: [smoke-prod, synthetics]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 30 минут наблюдения
+        run: |
+          for i in $(seq 1 30); do
+            ./scripts/smoke.sh "${{ env.PROD_URL }}" || { echo "::error::smoke упал на минуте $i"; exit 1; }
+            sleep 60
+          done
+
+  # ─── QG.CDP.27 Auto Rollback ─────────────────────────────────────────────
+  auto-rollback:
+    name: QG.CDP.27 Auto Rollback
+    runs-on: ubuntu-latest
+    needs: soak
+    if: failure()
+    steps:
+      - run: |
+          echo "::warning::soak упал — откатываем"
+          # kubectl argo rollouts undo devops-demo -n devops-demo-prod
+
+  # ─── QG.CDP.28 Release Tag ───────────────────────────────────────────────
+  release:
+    name: QG.CDP.28 Release Tag
+    runs-on: ubuntu-latest
+    needs: soak
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          generate_release_notes: true

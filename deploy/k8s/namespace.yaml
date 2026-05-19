@@ -1,0 +1,14 @@
+# Базовые неймспейсы — нужно, чтобы kubeconform/checkov было что валидировать.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devops-demo-staging
+  labels:
+    env: staging
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devops-demo-prod
+  labels:
+    env: prod

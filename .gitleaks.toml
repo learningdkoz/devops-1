@@ -1,0 +1,14 @@
+# Конфиг gitleaks для CI-07.
+# Базовые правила берём из дефолтов, тут только allowlist-исключения,
+# чтобы не палиться на тестовых ключах.
+title = "devops-demo gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "тестовые/документационные паттерны"
+paths = [
+    '''README\.md''',
+    '''tests/.*''',
+]

@@ -1,0 +1,64 @@
+# Argo Rollouts: канарейка с авто-анализом — это сердце CDP-08/09/10/27.
+# В реальном кластере подвязывается на Service из Helm-чарта.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: devops-demo
+  namespace: devops-demo-prod
+spec:
+  replicas: 6
+  strategy:
+    canary:
+      canaryService: devops-demo-canary
+      stableService: devops-demo-stable
+      steps:
+        - setWeight: 5
+        - pause: { duration: 2m }
+        - analysis:
+            templates:
+              - templateName: success-rate
+        - setWeight: 25
+        - pause: { duration: 5m }
+        - analysis:
+            templates:
+              - templateName: success-rate
+        - setWeight: 50
+        - pause: { duration: 10m }
+        - setWeight: 100
+  selector:
+    matchLabels:
+      app: devops-demo
+  template:
+    metadata:
+      labels:
+        app: devops-demo
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/dmitrykozyrin/devops-demo:latest
+          ports: [{ containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+---
+# AnalysisTemplate — сюда подтягивается метрика из Prometheus.
+# Если success-rate < 99% за окно — Rollout сам откатится (CDP-27).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+  namespace: devops-demo-prod
+spec:
+  metrics:
+    - name: success-rate
+      interval: 30s
+      successCondition: result[0] >= 0.99
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc:9090
+          query: |
+            sum(rate(http_requests_total{app="devops-demo",code!~"5.."}[2m]))
+              /
+            sum(rate(http_requests_total{app="devops-demo"}[2m]))

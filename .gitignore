@@ -1,0 +1,29 @@
+# Питон-мусор
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Тестовый/линтерский кэш
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE и ОС
+.idea/
+.vscode/
+.DS_Store
+
+# venv
+.venv/
+venv/
+
+# Артефакты пайплайна
+sbom.json
+trivy-report.*
+zap-report.*

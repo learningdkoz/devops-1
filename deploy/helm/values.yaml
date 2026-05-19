@@ -1,0 +1,49 @@
+# Дефолтные значения для staging/preprod. Прод-окружение оверрайдит свой values.
+image:
+  repository: ghcr.io/dmitrykozyrin/devops-demo
+  tag: "latest"      # CDP перетегает в SHA коммита
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Probes — отрабатывают CDP-13 (Health Probes).
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# Pod Security — обязалово для CI-20.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+env:
+  LOG_LEVEL: INFO
